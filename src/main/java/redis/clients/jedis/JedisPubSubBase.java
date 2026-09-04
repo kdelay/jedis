@@ -112,6 +112,7 @@ public abstract class JedisPubSubBase<T> {
       process();
     } finally {
       authenticator.client.setActiveSubscription(false);
+      markBrokenIfStillSubscribed();
       authenticator.client.rollbackTimeout();
     }
   }
@@ -125,7 +126,20 @@ public abstract class JedisPubSubBase<T> {
       process();
     } finally {
       authenticator.client.setActiveSubscription(false);
+      markBrokenIfStillSubscribed();
       authenticator.client.rollbackTimeout();
+    }
+  }
+
+  /**
+   * The read loop can end while the server still has this connection in subscriber mode: a
+   * callback threw, or the listener thread was interrupted. The socket is intact, so
+   * {@link Connection#close()} would hand it back to the pool as a healthy resource and the next
+   * borrower would inherit the subscription.
+   */
+  private void markBrokenIfStillSubscribed() {
+    if (isSubscribed()) {
+      authenticator.client.setBroken();
     }
   }
 

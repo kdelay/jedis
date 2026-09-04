@@ -9,11 +9,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static redis.clients.jedis.Protocol.ResponseKeyword.MESSAGE;
 import static redis.clients.jedis.Protocol.ResponseKeyword.SUBSCRIBE;
+import static redis.clients.jedis.Protocol.ResponseKeyword.UNSUBSCRIBE;
 
 public class JedisPubSubBaseTest  {
     @Test
@@ -62,5 +66,77 @@ public class JedisPubSubBaseTest  {
         if (workerError.get() != null) {
             throw new AssertionError("proceed() threw unexpectedly", workerError.get());
         }
+    }
+
+    @Test
+    public void testProceed_givenCallbackThrows_marksConnectionBroken() {
+        final JedisPubSubBase<String> pubSub = new JedisPubSubBase<String>() {
+
+            @Override
+            public void onMessage(String channel, String message) {
+                throw new IllegalStateException("callback failure");
+            }
+
+            @Override
+            protected String encode(byte[] raw) {
+                return SafeEncoder.encode(raw);
+            }
+        };
+
+        final Connection mockConnection = mock(Connection.class);
+        when(mockConnection.getUnflushedObject()).thenReturn(
+                Arrays.asList(SUBSCRIBE.getRaw(), "channel".getBytes(), 1L),
+                Arrays.asList(MESSAGE.getRaw(), "channel".getBytes(), "message".getBytes()));
+
+        assertThrows(IllegalStateException.class,
+            () -> pubSub.proceed(mockConnection, "channel"));
+
+        verify(mockConnection).setBroken();
+    }
+
+    @Test
+    public void testProceed_givenThreadInterrupt_marksConnectionBroken() throws InterruptedException {
+        final JedisPubSubBase<String> pubSub = new JedisPubSubBase<String>() {
+
+            @Override
+            protected String encode(byte[] raw) {
+                return SafeEncoder.encode(raw);
+            }
+        };
+
+        final Connection mockConnection = mock(Connection.class);
+        when(mockConnection.getUnflushedObject()).thenReturn(
+                Arrays.asList(SUBSCRIBE.getRaw(), "channel".getBytes(), 1L),
+                Arrays.asList(MESSAGE.getRaw(), "channel".getBytes(), "message".getBytes()));
+
+        final Thread thread = new Thread(() -> {
+            Thread.currentThread().interrupt();
+            pubSub.proceed(mockConnection, "channel");
+        }, "pubsub-interrupt-broken-test");
+        thread.start();
+        thread.join(TimeUnit.SECONDS.toMillis(1));
+        assertFalse(thread.isAlive(), "proceed() should return promptly when interrupted");
+
+        verify(mockConnection).setBroken();
+    }
+
+    @Test
+    public void testProceed_givenServerUnsubscribe_keepsConnectionUsable() {
+        final JedisPubSubBase<String> pubSub = new JedisPubSubBase<String>() {
+
+            @Override
+            protected String encode(byte[] raw) {
+                return SafeEncoder.encode(raw);
+            }
+        };
+
+        final Connection mockConnection = mock(Connection.class);
+        when(mockConnection.getUnflushedObject()).thenReturn(
+                Arrays.asList(SUBSCRIBE.getRaw(), "channel".getBytes(), 1L),
+                Arrays.asList(UNSUBSCRIBE.getRaw(), "channel".getBytes(), 0L));
+
+        pubSub.proceed(mockConnection, "channel");
+
+        verify(mockConnection, never()).setBroken();
     }
 }
